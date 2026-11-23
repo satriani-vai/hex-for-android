@@ -11,14 +11,14 @@ clean.
 
 ## Install
 
-Requirements: an arm64 Android phone on Android 11 or later, about 1.5 GB
-free, and 2 GB of RAM to spare. Phones from 2021 on are fastest. Older ones
-work, more slowly.
+Requirements: an arm64 Android phone on Android 11 or later, about 1 GB of
+free space per speech model (731–751 MB each), and 2 GB of RAM to spare.
+Phones from 2021 on are fastest. Older ones work, more slowly.
 
 1. Download `hex-android-<version>.apk` and open it. Allow your browser or
    file manager to install apps when Android asks.
 2. Open Hex and follow **Set up**: microphone, notifications, accessibility,
-   battery, and the speech model (731 MB, use Wi-Fi).
+   battery, and the speech model (about 700 MB, use Wi-Fi).
 3. **If the accessibility switch is greyed out:** Android restricts that
    setting for apps installed outside a store. Open App info for Hex, tap ⋮,
    then **Allow restricted settings**, and try again. Hex's setup row links
@@ -34,6 +34,23 @@ work, more slowly.
 - **Long-press:** cancels a tapped recording.
 - **Drag:** moves the bubble; it snaps to the nearer edge.
 
+**Languages**
+
+Hex starts with desktop Hex's English model. Two more models transcribe
+German and Russian, both pinned to the same files desktop Hex downloads and
+checks:
+
+- **Parakeet v3** (739 MB): NVIDIA's multilingual TDT model over 25 European
+  languages, German and Russian included. It hears which language is spoken,
+  so there is nothing to choose.
+- **Nemotron 3.5 ASR** (751 MB): NVIDIA's cache-aware FastConformer over 27
+  languages, German and Russian included, whose language prompt takes the
+  language you picked in Dictation › Language.
+
+Pick either under Dictation › Speech model. The vocabulary biases either one,
+exactly as it biases the English model. Everything else — the bubble, the
+text steps, where the text goes — is the same.
+
 **Customising:**
 
 - **Bubble:** Shape and Size set the bubble's look (circle, square, hexagon,
@@ -41,6 +58,16 @@ work, more slowly.
 - **Dictation › Clean-up:** spoken formatting and filler-word removal are on
   by default; spoken symbols ("hashtag" → #) and word replacements are there
   to turn on.
+- **Dictation › Language:** the language of the model you picked. Parakeet v3
+  and Nemotron ASR start on **Auto**, because they hear which language is
+  spoken; picking a language tells the model what to expect (Nemotron's run
+  takes it, Parakeet v3 only shows it). With Nemotron 3.5 ASR a picked
+  language is sent as its locale ("de-DE", "ru-RU"). Filler-word removal
+  stays English-only: "um" and "er" are ordinary German words, so a German or
+  Russian dictation keeps them.
+- **Dictation › Speech model:** picks which of the downloaded models runs,
+  downloads or verifies another, and removes one you don't use. Each model is
+  about 700 MB, so remove the ones you don't dictate in.
 - **Advanced:** desktop Hex's seven sound sets (off by default), how text is
   inserted, audio ducking, CPU threads, and the optional desktop sync.
 
@@ -53,7 +80,7 @@ certificate digest published with the release against
 | Part | Source in Hex | How |
 |---|---|---|
 | Speech engine | Hex's `transcribe.cpp` fork, the rev pinned in `../Cargo.toml` | `transcribe-cpp` crate, built with the NDK |
-| Model | Parakeet Unified English 0.6B Q8_0 (`src/transcription/artifacts.rs`) | Same Hugging Face revision and SHA-256 |
+| Models | Parakeet Unified English, Parakeet v3 and Nemotron 3.5 ASR, all 0.6B Q8_0 (`src/transcription/artifacts.rs`) | Same Hugging Face revisions and SHA-256s |
 | Vocabulary biasing | Parakeet rescoring in Hex's engine fork | Same term limit (64) and boost levels as `src/dictation/vocabulary.rs` |
 | Text steps | `src/dictation/{spoken_formatting,spoken_symbols,filler_words,text_replacements}.rs` | Compiled directly with `#[path]`; their tests run here too |
 | Look | Rune's Inter and IBM Plex Mono, colours sampled from `tests/golden/`, row icons from `src/rune_ui/icons.rs`, the mark from `app/AppIcon.icon` | `tools/icons-from-hex.py`; tokens and pieces in `Ui.kt` |
@@ -73,7 +100,7 @@ android/
 │   ├── DictationService         microphone foreground service; keeps the model loaded
 │   ├── Dictation                record → transcribe → text steps → deliver
 │   ├── Inserter                 edit the focused field at the caret, or paste
-│   ├── ModelStore               download with resume, SHA-256 check
+│   ├── ModelStore               the model picker; download with resume, SHA-256 check
 │   ├── Vocabulary               terms and sync with desktop Hex
 │   └── MainActivity, Ui, Sheet  settings in desktop Hex's design
 ├── tools/             icons-from-hex.py, hex-vocab-sync (+ systemd unit)
@@ -145,7 +172,17 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 The core needs the whole fork checked out, because it compiles Hex's own
-text-step files.
+text-step files. The `android/` directory also builds on its own — it is its
+own Gradle root in a checkout that holds only `android/`, which is what a
+phone or Android Studio sees — but then the core can't build, and the task
+says so and offers the way on:
+
+```sh
+./gradlew assembleDebug -PskipCore   # packages the jniLibs already there
+```
+
+With no `libhexcore*.so` in `app/src/main/jniLibs` the APK still installs and
+its settings work, but it cannot transcribe, and the build warns about it.
 
 Tests and checks:
 
@@ -182,7 +219,8 @@ core build fails, and the fix goes in `core/src/dictation.rs`.
 
 - **Code:** MIT, as Hex.
 - **Speech engine:** transcribe.cpp, MIT.
-- **Model:** NVIDIA Parakeet, CC-BY-4.0, downloaded from Hugging Face at
-  first run.
+- **Models:** NVIDIA Parakeet (Unified English and v3) under CC-BY-4.0 and
+  Nemotron 3.5 ASR under OpenMDW-1.1, downloaded from Hugging Face when you
+  install them.
 - **Fonts:** Inter and IBM Plex Mono, SIL OFL 1.1 (`licenses/`).
 - **Sounds:** desktop Hex's sound sets (`resources/audio/sounds/`), MIT.

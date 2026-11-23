@@ -51,12 +51,14 @@ class MainActivity : Activity() {
     private lateinit var cleanupRow: Ui.Row
     private lateinit var recentCard: Ui.Card
     private lateinit var modelRow: Ui.Row
+    private lateinit var languageRow: Ui.Row
     private lateinit var soundsRow: Ui.Row
     private lateinit var syncRow: Ui.Row
     private lateinit var advanced: View
     private lateinit var advancedChevron: ImageView
     private lateinit var footer: TextView
     private var downloading: String? = null
+    private var downloadingModel: ModelStore.Model? = null
     private var downloadProgress = 0
     /** The user went to the accessibility settings once; if Hex is still off there, Android may have greyed it out. */
     private var askedAccessibility = false
@@ -196,9 +198,13 @@ class MainActivity : Activity() {
         val vocabulary = ui.sheetValue("")
         vocabularyValue = vocabulary.getChildAt(0) as TextView
         cleanupRow = ui.row("Clean-up", "", R.drawable.hex_icon_sparkles, trailing = chevron()) { cleanupSheet() }
+        modelRow = ui.row("Speech model", "", R.drawable.hex_icon_wave, trailing = chevron()) { modelSheet() }
+        languageRow = ui.row("Language", "", R.drawable.hex_icon_text_tool, trailing = chevron()) { languageSheet() }
         root.addView(ui.card().apply {
             row(ui.row("Vocabulary", icon = R.drawable.hex_icon_book, trailing = vocabulary) { vocabularySheet() })
             row(cleanupRow)
+            row(modelRow)
+            row(languageRow)
             row(ui.row("Practice", "Try the bubble without leaving Hex", R.drawable.hex_icon_mic, trailing = chevron()) { practiceSheet() })
         })
 
@@ -219,12 +225,10 @@ class MainActivity : Activity() {
             addView(advancedChevron)
             setOnClickListener { toggleAdvanced() }
         })
-        modelRow = ui.row("Speech model", "Parakeet Unified English", R.drawable.hex_icon_wave, trailing = chevron()) { modelSheet() }
         soundsRow = ui.row("Sounds", "", R.drawable.hex_icon_speaker, trailing = chevron()) { soundsSheet() }
         syncRow = ui.row("Desktop sync", "", R.drawable.hex_icon_refresh, trailing = chevron()) { syncSheet() }
         advanced = ui.card().apply {
             visibility = View.GONE
-            row(modelRow)
             row(soundsRow)
             row(ui.row("Insert text", "Paste uses the clipboard", R.drawable.hex_icon_paste, below = ui.segmented(
                 listOf("auto" to "Type", "paste" to "Paste"), settings.insertMode,
@@ -319,10 +323,14 @@ class MainActivity : Activity() {
             else -> "$terms terms"
         }
         cleanupRow.describe(cleanupSummary())
+        languageRow.describe(when (settings.language) {
+            ModelStore.AUTO -> "Auto · ${settings.model().languages.size} languages"
+            else -> ModelStore.languageLabel(settings.language)
+        })
         modelRow.describe(when {
             downloading != null -> "$downloading $downloadProgress%"
-            ModelStore.isPresent(this) -> "Parakeet Unified English"
-            else -> "Not downloaded"
+            ModelStore.isPresent(this, settings.model()) -> settings.model().name
+            else -> "${settings.model().name} · not downloaded"
         })
 
         soundsRow.describe(if (settings.sounds) Sounds.Set.of(settings.soundSet).label else "Off")
@@ -419,10 +427,11 @@ class MainActivity : Activity() {
                 { getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName) },
                 { startActivity(Intent(AndroidSettings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))) }),
             SetupStep("Speech model",
-                if (downloading != null) "$downloading $downloadProgress%" else "Parakeet Unified English · 731 MB",
-                R.drawable.hex_icon_wave, if (ModelStore.isPresent(this)) "Verify" else "Download",
-                { ModelStore.isVerified(this) },
-                { fetchModel() }),
+                if (downloading != null) "$downloading $downloadProgress%"
+                else "${settings.model().name} · ${settings.model().sizeLabel}",
+                R.drawable.hex_icon_wave, if (ModelStore.isPresent(this, settings.model())) "Verify" else "Download",
+                { ModelStore.isVerified(this, settings.model()) },
+                { fetchModel(settings.model()) }),
         )
     }
 
@@ -437,27 +446,50 @@ class MainActivity : Activity() {
         return enabled.split(':').any { ComponentName.unflattenFromString(it) == name }
     }
 
-    private fun fetchModel() {
+    /** Downloads (or verifies) one model and selects it once it is in place. */
+    private fun fetchModel(model: ModelStore.Model) {
         if (downloading != null) return
-        val verifyOnly = ModelStore.isPresent(this)
+        val verifyOnly = ModelStore.isPresent(this, model)
         downloading = if (verifyOnly) "Verifying" else "Downloading"
+        downloadingModel = model
         downloadProgress = 0
         refresh()
         thread(name = "hex-model") {
             val result = runCatching {
                 if (verifyOnly) {
-                    ModelStore.verify(this) { f -> progress((f * 100).toInt()) }
+                    ModelStore.verify(this, model) { f -> progress((f * 100).toInt()) }
                 } else {
-                    ModelStore.download(this) { have, total -> progress((have * 100 / total).toInt()) }
+                    ModelStore.download(this, model) { have, total -> progress((have * 100 / total).toInt()) }
                 }
             }
             runOnUiThread {
+                val fetched = downloadingModel
                 downloading = null
-                result.onFailure { toast("Model: ${it.message}") }
-                result.onSuccess { ok -> if (!ok) toast("The model's checksum is wrong. Download it again") }
+                downloadingModel = null
+                result.onFailure { toast("${model.name}: ${it.message}") }
+                // A model asked for becomes the one Hex runs with; the engine
+                // reloads while Hex is on, else the next arm loads it.
+                result.onSuccess { ok ->
+                    if (ok) {
+                        if (fetched != null) chooseModel(fetched)
+                    } else {
+                        toast("The model's checksum is wrong. Download it again")
+                    }
+                }
                 refresh()
             }
         }
+    }
+
+    /** Applies a picked model and its language, reloading the engine if Hex is on. */
+    private fun chooseModel(model: ModelStore.Model) {
+        settings.modelId = model.id
+        settings.language = ModelStore.languageFor(model, settings.language)
+        if (DictationService.running) {
+            Dictation.disarm()
+            Dictation.arm(this)
+        }
+        refresh()
     }
 
     private fun progress(percent: Int) {
@@ -630,23 +662,143 @@ class MainActivity : Activity() {
     }
 
     private fun modelSheet() {
-        val sheet = Sheet(this, ui, "Speech model", listOf("Parakeet Unified English, desktop Hex's English model, running on this phone"))
+        val sheet = Sheet(this, ui, "Speech model", listOf(
+            "Pinned to desktop Hex's catalog: the same Hugging Face files and checksums. Each is about 700 MB, so remove the ones you don't use",
+            "Parakeet v3 and Nemotron ASR hear which language is spoken, so their Language sheet starts on Auto",
+        ))
         val card = ui.card()
-        val state = Dictation.state
-        val file = when {
-            ModelStore.isVerified(this) -> "731 MB · verified"
-            ModelStore.isPresent(this) -> "731 MB · not verified"
-            else -> "Not downloaded"
+        val checks = mutableMapOf<String, View>()
+        fun mark() = ModelStore.models.forEach { model ->
+            checks[model.id]?.visibility = if (model.id == settings.modelId) View.VISIBLE else View.INVISIBLE
         }
-        card.row(ui.row("File", file, R.drawable.hex_icon_folder))
-        card.row(ui.row("Engine", state.engine ?: "Loads when Hex turns on", R.drawable.hex_icon_terminal))
-        state.last?.let {
-            card.row(ui.row("Last dictation", "%.1f s of audio in %.2f s".format(it.audioMs / 1000f, it.inferenceMs / 1000f), R.drawable.hex_icon_timer))
+        ModelStore.models.forEach { model ->
+            val check = ui.icon(R.drawable.hex_check, 18, ui.t.accent)
+            checks[model.id] = check
+            val trailing = ui.horizontal {
+                addView(check)
+                if (model.id != settings.modelId && ModelStore.isPresent(this@MainActivity, model)) {
+                    addView(View(context), LinearLayout.LayoutParams(ui.px(8), 1))
+                    addView(removeButton { confirmRemove(model) { sheet.dismiss(); modelSheet() } })
+                }
+            }
+            card.row(ui.row(model.name, modelDetail(model), R.drawable.hex_icon_wave, trailing = trailing) {
+                when {
+                    downloading != null -> toast("A download is already running")
+                    ModelStore.isPresent(this@MainActivity, model) -> {
+                        chooseModel(model)
+                        mark()
+                    }
+                    else -> {
+                        sheet.dismiss()
+                        fetchModel(model)
+                    }
+                }
+            })
         }
+        mark()
         sheet.body.addView(card)
+        val model = settings.model()
+        sheet.body.addView(ui.space(12))
+        val state = Dictation.state
+        sheet.body.addView(ui.card().apply {
+            val file = when {
+                downloadingModel == model -> "$downloading $downloadProgress%"
+                ModelStore.isVerified(this@MainActivity, model) -> "${model.sizeLabel} · verified"
+                ModelStore.isPresent(this@MainActivity, model) -> "${model.sizeLabel} · not verified"
+                else -> "Not downloaded"
+            }
+            row(ui.row("File", file, R.drawable.hex_icon_folder))
+            row(ui.row("Engine", state.engine ?: "Loads when Hex turns on", R.drawable.hex_icon_terminal))
+            state.last?.let {
+                row(ui.row("Last dictation", "%.1f s of audio in %.2f s".format(it.audioMs / 1000f, it.inferenceMs / 1000f), R.drawable.hex_icon_timer))
+            }
+        })
+        sheet.setOnDismissListener { refresh() }
         sheet.actions(
-            listOf(ui.button(if (ModelStore.isPresent(this)) "Verify" else "Download") { sheet.dismiss(); fetchModel() }),
+            listOf(ui.button(if (ModelStore.isPresent(this, model)) "Verify" else "Download") { sheet.dismiss(); fetchModel(model) }),
             listOf(ui.button("Done") { sheet.dismiss() }),
+        )
+        sheet.show()
+    }
+
+    /** A model's size and languages, with what the phone holds of it. */
+    private fun modelDetail(model: ModelStore.Model): String {
+        val present = ModelStore.isPresent(this, model)
+        return buildString {
+            append(model.sizeLabel)
+            append(" · ")
+            append(model.summary)
+            when {
+                model == downloadingModel -> append(" · $downloading $downloadProgress%")
+                present && !ModelStore.isVerified(this@MainActivity, model) -> append(" · not verified")
+                !present -> append(" · not downloaded")
+            }
+        }
+    }
+
+    /** The languages the selected model transcribes. */
+    private fun languageSheet() {
+        val model = settings.model()
+        val sheet = Sheet(this, ui, "Language", listOf(when {
+            model.id == ModelStore.Nemotron.id ->
+                "Nemotron takes the language you pick. Auto leaves it to hear which of its ${model.languages.size} languages is spoken"
+            model.detects ->
+                "${model.name} hears which of its ${model.languages.size} languages is spoken, so this says what you expect, not what it needs"
+            else ->
+                "${model.name} transcribes ${ModelStore.languageName(model.languages.first())} only. Parakeet v3 and Nemotron ASR hear which language is spoken, German and Russian included"
+        }))
+        val card = ui.card()
+        val checks = mutableMapOf<String, View>()
+        fun mark() = model.languageChoices().forEach { code ->
+            checks[code]?.visibility = if (code == settings.language) View.VISIBLE else View.INVISIBLE
+        }
+        model.languageChoices().forEach { code ->
+            val check = ui.icon(R.drawable.hex_check, 18, ui.t.accent)
+            checks[code] = check
+            card.row(ui.row(
+                ModelStore.languageLabel(code),
+                if (code == ModelStore.AUTO) "One of ${model.languages.size} languages" else null,
+                trailing = check,
+            ) {
+                settings.language = code
+                mark()
+            })
+        }
+        mark()
+        sheet.body.addView(card)
+        if (!model.detects) {
+            // Only a model that hears the language itself can offer Auto, so
+            // say so and lead to the picker instead of leaving a dead end.
+            sheet.body.addView(ui.space(12))
+            sheet.body.addView(ui.card().apply {
+                val others = ModelStore.models.filter { it.detects }
+                row(ui.row(
+                    "Auto-detect the language",
+                    "${others.joinToString(" or ") { it.name }} hear which language is spoken and transcribe German and Russian",
+                    R.drawable.hex_icon_wave,
+                    trailing = chevron(),
+                ) {
+                    sheet.dismiss()
+                    modelSheet()
+                })
+            })
+        }
+        sheet.setOnDismissListener { refresh() }
+        sheet.actions(emptyList(), listOf(ui.button("Done") { sheet.dismiss() }))
+        sheet.show()
+    }
+
+    private fun confirmRemove(model: ModelStore.Model, onDone: () -> Unit) {
+        val sheet = Sheet(this, ui, "Remove ${model.name}?", listOf(
+            "The ${model.sizeLabel} file leaves this phone. You can download it again whenever you want it",
+        ))
+        sheet.actions(
+            listOf(ui.button("Cancel") { sheet.dismiss() }),
+            listOf(ui.button("Remove") {
+                ModelStore.remove(this, model)
+                sheet.dismiss()
+                onDone()
+            }),
         )
         sheet.show()
     }
@@ -766,6 +918,8 @@ class MainActivity : Activity() {
         card.row(ui.row("Hex", "Anomaly · MIT License", R.drawable.hex_mark))
         card.row(ui.row("transcribe.cpp", "Speech engine · MIT License", R.drawable.hex_icon_terminal))
         card.row(ui.row("Parakeet Unified English", "NVIDIA · CC-BY-4.0", R.drawable.hex_icon_wave))
+        card.row(ui.row("Parakeet v3", "NVIDIA · CC-BY-4.0", R.drawable.hex_icon_wave))
+        card.row(ui.row("Nemotron 3.5 ASR", "NVIDIA · OpenMDW-1.1", R.drawable.hex_icon_wave))
         card.row(ui.row("Inter, IBM Plex Mono", "SIL Open Font License 1.1", R.drawable.hex_icon_text_tool))
         sheet.body.addView(card)
         sheet.actions(emptyList(), listOf(ui.button("Done") { sheet.dismiss() }))

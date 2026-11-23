@@ -97,13 +97,15 @@ object Dictation {
         if (armed) return
         val mine = ++session
         update { copy(phase = Phase.Loading, message = null) }
-        val threads = Settings(app).threadCount()
+        val settings = Settings(app)
+        val threads = settings.threadCount()
         worker.execute {
             try {
-                if (!ModelStore.isPresent(app)) error("Download the speech model first")
-                if (!ModelStore.isVerified(app) && !ModelStore.verify(app)) error("The model file is damaged. Download it again")
+                val model = settings.model()
+                if (!ModelStore.isPresent(app, model)) error("Download ${model.name} first")
+                if (!ModelStore.isVerified(app, model) && !ModelStore.verify(app, model)) error("The model file is damaged. Download it again")
                 engine?.close()
-                val loaded = HexCore.load(ModelStore.file(app).absolutePath, threads)
+                val loaded = HexCore.load(ModelStore.file(app, model).absolutePath, threads)
                 engine = loaded
                 val description = loaded.describe()
                 Log.i(TAG, "engine ready: $description")

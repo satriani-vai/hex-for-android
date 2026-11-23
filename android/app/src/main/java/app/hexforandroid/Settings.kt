@@ -7,8 +7,9 @@ import org.json.JSONObject
 
 /**
  * User settings, with defaults for someone who just installed the app:
- * Parakeet Unified English, spoken formatting and filler removal on, vocabulary
- * biasing on (it does nothing until there are terms), sounds off.
+ * Parakeet Unified English in English, spoken formatting and filler removal
+ * on, vocabulary biasing on (it does nothing until there are terms), sounds
+ * off.
  */
 class Settings(context: Context) {
     private val app = context.applicationContext
@@ -16,6 +17,10 @@ class Settings(context: Context) {
 
     /** The user turned Hex on (the bubble shows) and hasn't turned it off. */
     var enabled by bool("enabled", false)
+    /** The speech model's id ([ModelStore.Model.id]); an unknown one reads as the English model. */
+    var modelId by string("model", ModelStore.English.id)
+    /** ISO code of the language dictated in, or `auto` for a model that hears it itself. */
+    var language by string("language", "en")
     var spokenFormatting by bool("spoken_formatting", true)
     /** Off by default: "hashtag" or "at sign" turning into symbols surprises people who didn't ask for it. */
     var spokenSymbols by bool("spoken_symbols", false)
@@ -44,8 +49,14 @@ class Settings(context: Context) {
 
     fun threadCount() = if (threads > 0) threads else autoThreads()
 
+    /** The model Hex transcribes with. */
+    fun model() = ModelStore.of(modelId)
+
     fun runSettings(): JSONObject = JSONObject().apply {
-        put("language", "en")
+        // Only a model whose prompt takes a language gets a hint: desktop
+        // Hex's catalog says Parakeet v3 hears the language itself, and a
+        // hint Nemotron can't take fails the run.
+        model().hintFor(language)?.let { put("language", it) }
         val terms = Vocabulary.entries(app)
         if (vocabularyBiasing && terms.isNotEmpty()) {
             put("vocabulary", JSONArray(terms.map { it.toJson() }))
@@ -64,7 +75,9 @@ class Settings(context: Context) {
         put("spoken_formatting", spokenFormatting)
         put("spoken_symbols", spokenSymbols)
         put("filler_words", fillerWords)
-        put("language", "en")
+        // Filler words leave an English dictation only: "er" and "um" are
+        // ordinary German words, and `auto` says nothing either.
+        put("language", language)
         put("replacements", JSONArray(replacements().map { (phrase, output) -> JSONObject().put("matched_phrase", phrase).put("output", output) }))
     }
 
